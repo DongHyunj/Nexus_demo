@@ -10,8 +10,4 @@ public class NexusApplication {
 		SpringApplication.run(NexusApplication.class, args);
 	}
 
-
-
-
-
 }
