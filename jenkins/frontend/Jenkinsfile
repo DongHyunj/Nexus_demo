@@ -1,0 +1,91 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME    = 'deatytim/nexus-frontend'
+        IMAGE_TAG     = "${env.BUILD_NUMBER}"
+        K8S_NAMESPACE = 'default'
+        SVC_NAME      = 'nexus-frontend-svc'
+        DEPLOY_TMPL   = 'k8s/frontend/deployment.yaml'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -f docker/frontend/Dockerfile -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                        echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                        docker tag  ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                        docker push ${IMAGE_NAME}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Determine Blue/Green Color') {
+            steps {
+                script {
+                    def cur = sh(
+                        script: "kubectl get svc ${SVC_NAME} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo 'blue'",
+                        returnStdout: true
+                    ).trim()
+                    env.CURRENT_COLOR = cur ?: 'blue'
+                    env.NEW_COLOR     = (env.CURRENT_COLOR == 'blue') ? 'green' : 'blue'
+                    echo "Active: ${env.CURRENT_COLOR}  →  Deploying to: ${env.NEW_COLOR}"
+                }
+            }
+        }
+
+        stage('Deploy Standby') {
+            steps {
+                sh """
+                    sed -e 's/{{COLOR}}/${env.NEW_COLOR}/g' \
+                        -e 's/{{IMAGE_TAG}}/${IMAGE_TAG}/g' \
+                        ${DEPLOY_TMPL} | kubectl apply -n ${K8S_NAMESPACE} -f -
+                    kubectl rollout status deployment/nexus-frontend-${env.NEW_COLOR} \
+                        -n ${K8S_NAMESPACE} --timeout=180s
+                """
+            }
+        }
+
+        stage('Switch Traffic') {
+            steps {
+                sh """
+                    kubectl patch svc ${SVC_NAME} -n ${K8S_NAMESPACE} \
+                        -p '{"spec":{"selector":{"color":"${env.NEW_COLOR}"}}}'
+                """
+                echo "Traffic switched to ${env.NEW_COLOR}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Frontend deployed (${env.NEW_COLOR}) — image: ${IMAGE_NAME}:${IMAGE_TAG}"
+        }
+        failure {
+            echo "❌ Deploy failed. Traffic still on ${env.CURRENT_COLOR}"
+        }
+        always {
+            sh 'docker logout || true'
+            sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+        }
+    }
+}

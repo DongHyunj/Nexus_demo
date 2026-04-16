@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-frontend-svc
+  namespace: default
+spec:
+  selector:
+    app: nexus-frontend
+    color: blue        # Jenkins가 배포 시 blue/green으로 전환
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP

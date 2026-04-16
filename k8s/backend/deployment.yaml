@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-backend-{{COLOR}}
+  namespace: default
+  labels:
+    app: nexus-backend
+    color: {{COLOR}}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nexus-backend
+      color: {{COLOR}}
+  template:
+    metadata:
+      labels:
+        app: nexus-backend
+        color: {{COLOR}}
+    spec:
+      containers:
+        - name: nexus-backend
+          image: deatytim/nexus-backend:{{IMAGE_TAG}}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:mysql://db-service:3306/nexus
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: password
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
