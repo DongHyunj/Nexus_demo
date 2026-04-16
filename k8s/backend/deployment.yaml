@@ -21,6 +21,7 @@ spec:
       containers:
         - name: nexus-backend
           image: deatytim/nexus-backend:{{IMAGE_TAG}}
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:

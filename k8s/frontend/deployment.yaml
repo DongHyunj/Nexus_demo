@@ -21,6 +21,7 @@ spec:
       containers:
         - name: nexus-frontend
           image: deatytim/nexus-frontend:{{IMAGE_TAG}}
+          imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
