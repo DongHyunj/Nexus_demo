@@ -1,46 +1,33 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nexus-backend-{{COLOR}}
-  namespace: default
+  name: nexus-backend
   labels:
     app: nexus-backend
-    color: {{COLOR}}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: nexus-backend
-      color: {{COLOR}}
   template:
     metadata:
       labels:
         app: nexus-backend
-        color: {{COLOR}}
     spec:
       containers:
         - name: nexus-backend
-          image: deatytim/nexus-backend:{{IMAGE_TAG}}
-          imagePullPolicy: Always
+          image: deatytim/nexusback:latest
           ports:
             - containerPort: 8080
-          env:
-            - name: SPRING_DATASOURCE_URL
-              value: jdbc:mariadb://db-service:3306/nexus
-            - name: SPRING_DATASOURCE_USERNAME
-              value: root
-            - name: SPRING_DATASOURCE_PASSWORD
-              value: qwer1234
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "200m"
-            limits:
-              memory: "512Mi"
-              cpu: "1000m"
           readinessProbe:
             httpGet:
               path: /actuator/health
               port: 8080
-            initialDelaySeconds: 20
+            initialDelaySeconds: 30
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30

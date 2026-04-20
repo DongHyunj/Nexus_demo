@@ -5,35 +5,25 @@ pipeline {
 apiVersion: v1
 kind: Pod
 spec:
+  serviceAccountName: jenkins
   containers:
-  - name: dind
-    image: docker:24-dind
-    securityContext:
-      privileged: true
-    env:
-    - name: DOCKER_TLS_CERTDIR
-      value: ""
-    volumeMounts:
-    - name: docker-storage
-      mountPath: /var/lib/docker
+  - name: gradle
+    image: eclipse-temurin:17-jdk-alpine
+    command: ['sleep', 'infinity']
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command: ['sleep', 'infinity']
   - name: kubectl
     image: bitnami/kubectl:latest
     command: ['sleep', 'infinity']
     securityContext:
       runAsUser: 0
-  volumes:
-  - name: docker-storage
-    emptyDir: {}
 """
         }
     }
 
     environment {
-        IMAGE_NAME    = 'deatytim/nexus-backend'
-        IMAGE_TAG     = "${env.BUILD_NUMBER}"
-        K8S_NAMESPACE = 'default'
-        SVC_NAME      = 'nexus-backend-svc'
-        DEPLOY_TMPL   = 'k8s/backend/deployment.yaml'
+        IMAGE_REPO = 'deatytim/nexusback'
     }
 
     stages {
@@ -43,111 +33,49 @@ spec:
             }
         }
 
-        stage('Check Changes') {
+        stage('Build JAR') {
             steps {
-                script {
-                    def changes = currentBuild.changeSets
-                        .collectMany { it.items }
-                        .collectMany { it.affectedFiles*.path }
-                    echo "Changed files: ${changes}"
-                    def relevant = changes.any {
-                        it.startsWith('backend/') ||
-                        it.startsWith('docker/backend/') ||
-                        it.startsWith('k8s/backend/') ||
-                        it.startsWith('jenkins/backend/')
-                    }
-                    if (!relevant) {
-                        currentBuild.result = 'NOT_BUILT'
-                        error('backend 관련 변경 없음 — 파이프라인 스킵')
+                container('gradle') {
+                    dir('backend') {
+                        sh 'chmod +x gradlew && ./gradlew bootJar -x test'
                     }
                 }
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Build & Push Docker Image') {
             steps {
-                container('dind') {
-                    sh """
-                        until docker info > /dev/null 2>&1; do sleep 2; done
-                        docker build -f docker/backend/Dockerfile -t ${IMAGE_NAME}:${IMAGE_TAG} .
-                    """
-                }
-            }
-        }
-
-        stage('Push Docker Image') {
-            steps {
-                container('dind') {
+                container('kaniko') {
                     withCredentials([usernamePassword(
                         credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKER_USER',
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
                         sh """
-                            echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
-                            docker push ${IMAGE_NAME}:${IMAGE_TAG}
-                            docker tag  ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
-                            docker push ${IMAGE_NAME}:latest
+                            AUTH=\$(printf "%s:%s" "\$DOCKER_USER" "\$DOCKER_PASS" | base64 | tr -d '\\n')
+                            mkdir -p /kaniko/.docker
+                            printf '{"auths":{"https://index.docker.io/v1/":{"auth":"%s"}}}' "\$AUTH" > /kaniko/.docker/config.json
+                            /kaniko/executor \\
+                                --context=\$WORKSPACE/backend \\
+                                --dockerfile=\$WORKSPACE/docker/backend/Dockerfile \\
+                                --destination=${IMAGE_REPO}:${BUILD_NUMBER} \\
+                                --destination=${IMAGE_REPO}:latest
                         """
                     }
                 }
             }
         }
 
-        stage('Determine Blue/Green Color') {
-            steps {
-                container('kubectl') {
-                    script {
-                        def cur = sh(
-                            script: "kubectl get svc ${SVC_NAME} -n ${K8S_NAMESPACE} -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo 'blue'",
-                            returnStdout: true
-                        ).trim()
-                        env.CURRENT_COLOR = cur ?: 'blue'
-                        env.NEW_COLOR     = (env.CURRENT_COLOR == 'blue') ? 'green' : 'blue'
-                        echo "Active: ${env.CURRENT_COLOR}  →  Deploying to: ${env.NEW_COLOR}"
-                    }
-                }
-            }
-        }
-
-        stage('Deploy Standby') {
+        stage('Deploy to Kubernetes') {
             steps {
                 container('kubectl') {
                     sh """
-                        sed -e 's/{{COLOR}}/${env.NEW_COLOR}/g' \
-                            -e 's/{{IMAGE_TAG}}/${IMAGE_TAG}/g' \
-                            ${DEPLOY_TMPL} | kubectl apply -n ${K8S_NAMESPACE} -f -
-                        kubectl rollout status deployment/nexus-backend-${env.NEW_COLOR} \
-                            -n ${K8S_NAMESPACE} --timeout=180s
+                        kubectl apply -f k8s/backend/deployment.yaml
+                        kubectl apply -f k8s/backend/service.yaml
+                        kubectl set image deployment/nexus-backend nexus-backend=${IMAGE_REPO}:${BUILD_NUMBER}
+                        kubectl rollout status deployment/nexus-backend
                     """
                 }
-            }
-        }
-
-        stage('Switch Traffic') {
-            steps {
-                container('kubectl') {
-                    sh """
-                        kubectl patch svc ${SVC_NAME} -n ${K8S_NAMESPACE} \
-                            -p '{"spec":{"selector":{"color":"${env.NEW_COLOR}"}}}'
-                    """
-                    echo "Traffic switched to ${env.NEW_COLOR}"
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo "✅ Backend deployed (${env.NEW_COLOR}) — image: ${IMAGE_NAME}:${IMAGE_TAG}"
-        }
-        failure {
-            echo "❌ Deploy failed. Traffic still on ${env.CURRENT_COLOR}"
-        }
-        always {
-            container('dind') {
-                sh "docker logout || true"
-                sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
             }
         }
     }
